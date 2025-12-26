@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <float.h>
 #include <xmmintrin.h>  // _mm_malloc, _mm_free
 #include "common.h"
 
@@ -15,7 +16,6 @@ static void quantize_topx(const type* v, int D, int x, int* out_idx, signed char
     // Manteniamo una lista "top x" ordinata per valore assoluto crescente (pos 0 = più piccolo tra i top)
     // così sostituire è facile.
     // out_sign: +1 se v[idx]>=0, -1 se v[idx]<0
-    // Inizializzazione con -inf
     type* best_abs = (type*)malloc((size_t)x * sizeof(type));
     if (!best_abs) die("malloc best_abs fallita");
 
@@ -46,8 +46,6 @@ static void quantize_topx(const type* v, int D, int x, int* out_idx, signed char
     }
 
     free(best_abs);
-
-    // Nota: out_idx può contenere -1 se x>D (ma noi lo impediamo con controlli a monte)
 }
 
 // ---------- distanza approssimata tra due vettori quantizzati ----------
@@ -61,6 +59,7 @@ static inline type approx_dist_quantized(
     int acc = 0;
     for (int i = 0; i < x; i++) {
         int ia = idxA[i];
+        if (ia < 0) continue; // sicurezza
         for (int j = 0; j < x; j++) {
             if (ia == idxB[j]) {
                 acc += (int)sA[i] * (int)sB[j];  // +1 o -1
@@ -69,6 +68,15 @@ static inline type approx_dist_quantized(
         }
     }
     return (type)acc;
+}
+
+// ---------- trova indice del max in un array di k distanze ----------
+static inline int argmax_k(const type* dist, int k) {
+    int im = 0;
+    for (int i = 1; i < k; i++) {
+        if (dist[i] > dist[im]) im = i;
+    }
+    return im;
 }
 
 // ---------- ordina per distanza crescente (k piccolo: insertion sort) ----------
@@ -87,7 +95,6 @@ static void sort_by_dist(type* dist, int* ids, int k) {
     }
 }
 
-
 // ---------- distanza euclidea reale ----------
 static inline type euclid_dist(const type* a, const type* b, int D) {
     double acc = 0.0;
@@ -97,7 +104,6 @@ static inline type euclid_dist(const type* a, const type* b, int D) {
     }
     return (type)sqrt(acc);
 }
-
 
 // ---------- FIT ----------
 void fit(params* input) {
@@ -112,23 +118,22 @@ void fit(params* input) {
     const int h = input->h;
     const int x = input->x;
 
-    // 1) Selezione dei pivot (come da traccia: passo floor(N/h))
+    // 1) Selezione dei pivot (passo floor(N/h))
     if (!input->P) {
         input->P = (int*)malloc((size_t)h * sizeof(int));
         if (!input->P) die("malloc P fallita");
     }
 
-    int step = N / h; // floor(N/h)
-    if (step <= 0) step = 1; // caso limite, ma con h<=N step>=1
+    int step = N / h;            // floor(N/h)
+    if (step <= 0) step = 1;     // sicurezza
 
     for (int j = 0; j < h; j++) {
         int idx = step * j;
-        if (idx >= N) idx = N - 1; // sicurezza
+        if (idx >= N) idx = N - 1;
         input->P[j] = idx;
     }
 
     // 2) Alloca index: N x h (row-major)
-    // index[v*h + j] = \tilde d(v, pivot_j)
     if (input->index) {
         _mm_free(input->index);
         input->index = NULL;
@@ -138,7 +143,7 @@ void fit(params* input) {
     input->index = (type*)_mm_malloc(idx_elems * sizeof(type), align);
     if (!input->index) die("_mm_malloc index fallita");
 
-    // 3) Pre-quantizzazione dataset e pivot (per non rifarla N*h volte)
+    // 3) Pre-quantizzazione dataset e pivot (solo per costruire l'indice)
     int* q_idx_ds = (int*)malloc((size_t)N * (size_t)x * sizeof(int));
     signed char* q_sgn_ds = (signed char*)malloc((size_t)N * (size_t)x * sizeof(signed char));
     int* q_idx_pv = (int*)malloc((size_t)h * (size_t)x * sizeof(int));
@@ -148,14 +153,18 @@ void fit(params* input) {
     // quantizza DS
     for (int i = 0; i < N; i++) {
         const type* v = &input->DS[(size_t)i * (size_t)D];
-        quantize_topx(v, D, x, &q_idx_ds[(size_t)i * (size_t)x], &q_sgn_ds[(size_t)i * (size_t)x]);
+        quantize_topx(v, D, x,
+                      &q_idx_ds[(size_t)i * (size_t)x],
+                      &q_sgn_ds[(size_t)i * (size_t)x]);
     }
 
     // quantizza pivot
     for (int j = 0; j < h; j++) {
         int pid = input->P[j];
         const type* p = &input->DS[(size_t)pid * (size_t)D];
-        quantize_topx(p, D, x, &q_idx_pv[(size_t)j * (size_t)x], &q_sgn_pv[(size_t)j * (size_t)x]);
+        quantize_topx(p, D, x,
+                      &q_idx_pv[(size_t)j * (size_t)x],
+                      &q_sgn_pv[(size_t)j * (size_t)x]);
     }
 
     // 4) Costruzione indice: index[v][j] = approx_dist(v, pivot_j)
@@ -182,7 +191,7 @@ void fit(params* input) {
     }
 }
 
-
+// ---------- PREDICT ----------
 void predict(params* input) {
     if (!input) die("input NULL");
     if (!input->DS || !input->Q) die("DS o Q NULL");
@@ -217,7 +226,9 @@ void predict(params* input) {
 
     for (int j = 0; j < h; j++) {
         const type* p = &input->DS[(size_t)input->P[j] * (size_t)D];
-        quantize_topx(p, D, x, &pv_idx[(size_t)j * (size_t)x], &pv_sgn[(size_t)j * (size_t)x]);
+        quantize_topx(p, D, x,
+                      &pv_idx[(size_t)j * (size_t)x],
+                      &pv_sgn[(size_t)j * (size_t)x]);
     }
 
     // buffer per ~d(q,p)
@@ -237,47 +248,47 @@ void predict(params* input) {
     for (int qi = 0; qi < nq; qi++) {
         const type* q = &input->Q[(size_t)qi * (size_t)D];
 
-        // 1) quantizza q e calcola ~d(q,p) per ogni pivot (linee 2-3 pseudocodice) :contentReference[oaicite:3]{index=3}
+        // 1) quantizza q e calcola ~d(q,p) per ogni pivot
         quantize_topx(q, D, x, q_idx, q_sgn);
         for (int j = 0; j < h; j++) {
             dq_p[j] = approx_dist_quantized(
                 q_idx, q_sgn,
-                &pv_idx[(size_t)j * (size_t)x], &pv_sgn[(size_t)j * (size_t)x],
+                &pv_idx[(size_t)j * (size_t)x],
+                &pv_sgn[(size_t)j * (size_t)x],
                 x
             );
         }
 
-        // 2) inizializza K-NN con +inf (linea 1) :contentReference[oaicite:4]{index=4}
+        // 2) inizializza K-NN con +inf
         int*  best_id = &input->id_nn[(size_t)qi * (size_t)k];
         type* best_d  = &input->dist_nn[(size_t)qi * (size_t)k];
 
         for (int i = 0; i < k; i++) {
             best_id[i] = -1;
-            best_d[i]  = (type)INFINITY;
+            best_d[i]  = (type)FLT_MAX;
         }
 
         // 3) scansiona dataset
         for (int vi = 0; vi < N; vi++) {
-            // 3a) calcola bound con pivot: d*_pvt = max_p |~d(v,p) - ~d(q,p)| (linea 5) :contentReference[oaicite:5]{index=5}
-            type dstar = 0;
+            // 3a) bound con pivot: d*_pvt = max_p |~d(v,p) - ~d(q,p)|
+            type dstar = (type)0;
             const type* rowIndex = &input->index[(size_t)vi * (size_t)h];
             for (int j = 0; j < h; j++) {
                 type diff = (type)fabs((double)(rowIndex[j] - dq_p[j]));
                 if (diff > dstar) dstar = diff;
             }
 
-            // 3b) prendi dmax_k (linea 6) :contentReference[oaicite:6]{index=6}
+            // 3b) prendi dmax_k
             int imax = argmax_k(best_d, k);
             type dmax = best_d[imax];
 
-            // 3c) pruning (linea 7) :contentReference[oaicite:7]{index=7}
+            // 3c) pruning
             if (dstar < dmax) {
-                // calcola ~d(q,v) (linea 8) :contentReference[oaicite:8]{index=8}
+                // calcola ~d(q,v)
                 const type* v = &input->DS[(size_t)vi * (size_t)D];
                 quantize_topx(v, D, x, v_idx, v_sgn);
                 type dqv = approx_dist_quantized(q_idx, q_sgn, v_idx, v_sgn, x);
 
-                // se migliora, inserisci (linee 9-10) :contentReference[oaicite:9]{index=9}
                 if (dqv < dmax) {
                     best_d[imax]  = dqv;
                     best_id[imax] = vi;
@@ -285,17 +296,17 @@ void predict(params* input) {
             }
         }
 
-        // 4) calcola distanza reale sui K trovati (linee 11-12) :contentReference[oaicite:10]{index=10}
+        // 4) calcola distanza reale sui K trovati
         for (int i = 0; i < k; i++) {
             if (best_id[i] < 0) {
-                best_d[i] = (type)INFINITY;
+                best_d[i] = (type)FLT_MAX;
                 continue;
             }
             const type* v = &input->DS[(size_t)best_id[i] * (size_t)D];
             best_d[i] = euclid_dist(q, v, D);
         }
 
-        // 5) ordina per distanza crescente (comodo per output)
+        // 5) ordina per distanza crescente
         sort_by_dist(best_d, best_id, k);
     }
 
