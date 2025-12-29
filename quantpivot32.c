@@ -107,6 +107,7 @@ static inline type euclid_dist(const type* a, const type* b, int D) {
 
 // ---------- FIT ----------
 void fit(params* input) {
+    // TODO: Controllare che il numero di pivot sia minore del numero di righe
     if (!input) die("input NULL");
     if (!input->DS) die("DataSet NULL");
     if (input->N <= 0 || input->D <= 0) die("N o D non validi");
@@ -121,15 +122,13 @@ void fit(params* input) {
     // 1) Selezione dei pivot (passo floor(N/h))
     if (!input->P) {
         input->P = (int*)malloc((size_t)h * sizeof(int));
-        if (!input->P) die("malloc P fallita");
+        if (input->P == NULL) die("malloc P fallita");
     }
 
     int step = N / h;            // floor(N/h)
-    if (step <= 0) step = 1;     // sicurezza
 
     for (int j = 0; j < h; j++) {
         int idx = step * j;
-        if (idx >= N) idx = N - 1;
         input->P[j] = idx;
     }
 
