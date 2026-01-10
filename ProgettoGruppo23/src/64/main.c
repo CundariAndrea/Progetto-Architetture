@@ -1,164 +1,123 @@
 #include <stdio.h>
 #include <stdlib.h>
-
-#include <time.h>
-
+#include <math.h>
 #include <xmmintrin.h>
-
-#include <omp.h>
-
+#include <omp.h>        // Necessario per omp_get_wtime
 #include "common.h"
 
-#include "quantpivot64.c"
+// Dichiarazione funzioni esterne (presenti in quantpivot64.c)
+extern void fit(params* input);
+extern void predict(params* input);
+// Se la funzione di pulizia cache esiste nel .c, dichiarala extern, altrimenti ignorala
+// extern void quantpivot_free_cache(void); 
 
-/*
-*
-* 	load_data
-* 	=========
-*
-*	Legge da file una matrice di N righe
-* 	e M colonne e la memorizza in un array lineare in row-major order
-*
-* 	Codifica del file:
-* 	primi 4 byte: numero di righe (N) --> numero intero
-* 	successivi 4 byte: numero di colonne (M) --> numero intero
-* 	successivi N*M*4 byte: matrix data in row-major order --> numeri floating-point a precisione singola
-*/
-MATRIX load_data(char* filename, int *n, int *k) {
-	FILE* fp;
-	int rows, cols, status, i;
-	
-	fp = fopen(filename, "rb");
-	
-	if (fp == NULL){
-		printf("'%s': bad data file name!\n", filename);
-		exit(0);
-	}
-	
-	status = fread(&rows, sizeof(int), 1, fp);
-	status = fread(&cols, sizeof(int), 1, fp);
-	
-	MATRIX data = _mm_malloc(rows*cols*sizeof(type), align);
-	status = fread(data, sizeof(type), rows*cols, fp);
-	fclose(fp);
-	
-	*n = rows;
-	*k = cols;
-	
-	return data;
+// Helper per errori
+static void die(const char* msg) {
+    fprintf(stderr, "Errore: %s\n", msg);
+    exit(EXIT_FAILURE);
 }
 
-/*
-* 	save_data
-* 	=========
-* 
-*	Salva su file un array lineare in row-major order
-*	come matrice di N righe e M colonne
-* 
-* 	Codifica del file:
-* 	primi 4 byte: numero di righe (N) --> numero intero a 64 bit
-* 	successivi 4 byte: numero di colonne (M) --> numero intero a 64 bit
-* 	successivi N*M*4 byte: matrix data in row-major order --> numeri interi o floating-point a precisione singola
-*/
-void save_data(char* filename, void* X, int n, int k) {
-	FILE* fp;
-	int i;
-	fp = fopen(filename, "wb");
-	if(X != NULL){
-		fwrite(&n, 4, 1, fp);
-		fwrite(&k, 4, 1, fp);
-		for (i = 0; i < n; i++) {
-			fwrite(X, sizeof(type), k, fp);
-			//printf("%i %i\n", ((int*)X)[0], ((int*)X)[1]);
-			X += sizeof(type)*k;
-		}
-	}
-	else{
-		int x = 0;
-		fwrite(&x, 4, 1, fp);
-		fwrite(&x, 4, 1, fp);
-	}
-	fclose(fp);
+// Helper matematico per verifica (statico, visibile solo qui)
+static inline type euclid_dist(const type* a, const type* b, int D) {
+    double acc = 0.0;
+    for (int i = 0; i < D; i++) {
+        double d = (double)a[i] - (double)b[i];
+        acc += d * d;
+    }
+    return (type)sqrt(acc);
+}
+
+// Verifica coerenza risultati
+static void check_dist_nn_consistency(const params* p, int qi, double eps) {
+    const type* q = &p->Q[(size_t)qi * (size_t)p->D];
+    const int* ids = &p->id_nn[(size_t)qi * (size_t)p->k];
+    const type* dists = &p->dist_nn[(size_t)qi * (size_t)p->k];
+ 
+    for (int i = 0; i < p->k; i++) {
+        int id = ids[i];
+        if (id < 0 || id >= p->N) continue;
+        const type* v = &p->DS[(size_t)id * (size_t)p->D];
+        type d = euclid_dist(q, v, p->D);
+        double diff = fabs((double)d - (double)dists[i]);
+ 
+        if (diff > eps) {
+            printf("[FAIL] qi=%d pos=%d id=%d dist_nn=%f euclid=%f diff=%g\n",
+                   qi, i, id, (double)dists[i], (double)d, diff);
+        }
+    }
+}
+
+// Loader dati
+MATRIX load_data(const char* filename, int *n, int *d) {
+    FILE* fp = fopen(filename, "rb");
+    if (!fp) die("Impossibile aprire file dati");
+ 
+    int rows = 0, cols = 0;
+    if (fread(&rows, sizeof(int), 1, fp) != 1) die("Errore header righe");
+    if (fread(&cols, sizeof(int), 1, fp) != 1) die("Errore header colonne");
+ 
+    MATRIX data = (MATRIX)_mm_malloc((size_t)rows * (size_t)cols * sizeof(type), 16);
+    if (!data) die("Malloc fallita");
+ 
+    size_t tot = (size_t)rows * (size_t)cols;
+    if (fread(data, sizeof(type), tot, fp) != tot) die("Errore lettura corpo dati");
+    fclose(fp);
+    *n = rows; *d = cols;
+    return data;
 }
 
 int main(int argc, char** argv) {
+    if (argc < 3) {
+        fprintf(stderr, "Uso: %s <dataset> <query> [N D k]\n", argv[0]);
+        return 1;
+    }
+ 
+    params p = {0};
+    // Caricamento
+    printf("Caricamento dataset...\n");
+    p.DS = load_data(argv[1], &p.N, &p.D);
+    printf("Caricamento query...\n");
+    p.Q  = load_data(argv[2], &p.nq, &p.D);
+ 
+    // Parametri di default (sovrascrivibili se passi argomenti extra)
+    p.h = 8;
+    p.k = 5;
+    p.x = 4;
+    p.silent = 0;
+    
+    // Override parametri da riga di comando (opzionale)
+    if (argc >= 6) {
+        // argv[3] sarebbe N, argv[4] D (già letti dai file), argv[5] è K
+        p.k = atoi(argv[5]);
+    }
 
-	// ================= Parametri di ingresso =================
-	char* dsfilename = "ds.ds2";
-	char* queryfilename = "query.ds2";
-	int h = 2;
-	int k = 3;
-	int x = 2;
-	int silent = 0;
-	// =========================================================
+    // --- FIT ---
+    printf("Start Fit...\n");
+    double t0 = omp_get_wtime();
+    fit(&p);
+    double t1 = omp_get_wtime();
+    printf("Fit completata in %f sec\n", t1 - t0);
+ 
+    // --- PREDICT ---
+    printf("Start Predict...\n");
+    t0 = omp_get_wtime();
+    predict(&p);
+    t1 = omp_get_wtime();
+    printf("Predict completata in %f sec\n", t1 - t0);
 
-	params* input = malloc(sizeof(params));
-
-	input->DS = load_data(dsfilename, &input->N, &input->D);
-	input->Q = load_data(queryfilename, &input->nq, &input->D);
-	input->id_nn = _mm_malloc(input->nq*input->k*sizeof(int), align);
-	input->dist_nn = _mm_malloc(input->nq*input->k*sizeof(type), align);
-	input->h = h;
-	input->k = k;
-	input->x = x;
-	input->silent = silent;
-
-
-	clock_t t;
-	float time;
-
-	t = omp_get_wtime();
-	// =========================================================
-	fit(input);
-	// =========================================================
-	t = omp_get_wtime() - t;
-	time = ((float)t)/CLOCKS_PER_SEC;
-
-	if(!input->silent)
-		printf("FIT time = %.5f secs\n", time);
-	else
-		printf("%.3f\n", time);
-
-	t = omp_get_wtime();
-	// =========================================================
-	predict(input);
-	// =========================================================
-	t = omp_get_wtime() - t;
-	time = ((float)t)/CLOCKS_PER_SEC;
-
-	if(!input->silent)
-		printf("PREDICT time = %.5f secs\n", time);
-	else
-		printf("%.3f\n", time);
-
-	// Salva il risultato
-	char* outname_id = "out_idnn.ds2";
-	char* outname_k = "out_distnn.ds2";
-	save_data(outname_id, input->id_nn, input->nq, input->k);
-	save_data(outname_k, input->dist_nn, input->nq, input->k);
-
-	if(!input->silent){
-		for(int i=0; i<input->nq; i++){
-			printf("ID NN Q%3i: ( ", i);
-			for(int j=0; j<input->k; j++)
-				printf("%i ", input->id_nn[i*input->k + j]);
-			printf(")\n");
-		}
-		for(int i=0; i<input->nq; i++){
-			printf("Dist NN Q%3i: ( ", i);
-			for(int j=0; j<input->k; j++)
-				printf("%f ", input->dist_nn[i*input->k + j]);
-			printf(")\n");
-		}
-	}
-
-	_mm_free(input->DS);
-	_mm_free(input->Q);
-	_mm_free(input->P);
-	_mm_free(input->index);
-	_mm_free(input->id_nn);
-	_mm_free(input->dist_nn);
-	free(input);
-
-	return 0;
+    // Verifica
+    check_dist_nn_consistency(&p, 0, 1e-4);
+    
+    printf("\nKNN Query 0:\n");
+    for (int i = 0; i < p.k; i++) {
+        printf(" %d) id=%d dist=%f\n", i+1, p.id_nn[i], p.dist_nn[i]);
+    }
+ 
+    // Cleanup
+    _mm_free(p.DS); _mm_free(p.Q);
+    if(p.index) _mm_free(p.index);
+    if(p.dist_nn) _mm_free(p.dist_nn);
+    free(p.P); free(p.id_nn);
+ 
+    return 0;
 }

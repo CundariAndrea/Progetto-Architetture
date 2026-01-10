@@ -1,17 +1,15 @@
-
 CC = gcc
 
-# IMPORTANTE: -fopenmp deve essere qui
+# Aggiunto -fopenmp qui sotto!
 CFLAGS = -m64 -O3 -msse4.2 -Wall -fopenmp
 
 LIBS = -lm
 
 TARGET = main
-# Qui usa i file corretti
-SRCS = main.c quantpivot64omp.c
+SRCS = main.c quantpivot64.c
 OBJS = $(SRCS:.c=.o)
 
-# Adatta i nomi dei tuoi file se necessario
+# Parametri (Adatta ai tuoi file)
 FILE_DS = dataset_2000x256_64.ds2
 FILE_Q = query_2000x256_64.ds2
 
