@@ -1,0 +1,12 @@
+# build artifacts
+knn
+main
+quantpivot
+*.o
+*.a
+*.so
+*.out
+
+# misc
+*.log
+.DS_Store
