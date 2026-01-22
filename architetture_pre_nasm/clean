@@ -1,0 +1,29 @@
+#!/bin/bash
+
+printf "Pulizia completa del progetto...\n"
+
+for proj in $(ls -d ProgettoGruppo*); do
+    printf "\t$proj\n"
+
+    # Directory di build
+    rm -rf $proj/build/
+    rm -rf $proj/dist/
+    rm -rf $proj/*.egg-info
+
+    # File compilati Python
+    find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
+    find . -type f -name "*.pyc" -delete
+    find . -type f -name "*.pyo" -delete
+
+    # Estensioni compilate
+    find . -type f -name "*.so" -delete
+    find . -type f -name "*.pyd" -delete  # Windows
+
+    # Object files
+    find . -type f -name "*.o" -delete
+
+    # File temporanei NASM
+    find . -type f -name "*.lst" -delete
+
+    printf "completata\n"
+done

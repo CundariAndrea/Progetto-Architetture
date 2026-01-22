@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools", "numpy"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = 'gruppoX'
+version = "1.0"
+authors = [
+    {name = "Il Tuo Nome", email = "tua@email.com"},
+]
+description = "Quantized Index for K-NN search"
+readme = {file = "README.md", content-type = "text/markdown"}
+dependencies = ["numpy"]
