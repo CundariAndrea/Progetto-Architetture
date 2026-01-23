@@ -1,4 +1,5 @@
-CFLAGS = -Wall -fopenmp -O0 -msse -fPIC -z noexecstack
+CFLAGS = -Wall -fopenmp -O3 -msse -fPIC -z noexecstack
+
 TARGET = knn
 
 .PHONY: build run clean

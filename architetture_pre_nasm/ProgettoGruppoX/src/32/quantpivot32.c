@@ -4,53 +4,56 @@
 #include <xmmintrin.h>
 #include <string.h> // per memset
 #include "common.h"
+#include <time.h>
+
+
+static inline double now_sec(void){
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec *1e-9;
+
+}
+
 
 /**
  * Quantizzazione: Trova le X componenti con valore assoluto maggiore.
  * Output: riempie idx_buffer e sign_buffer
  */
 static void quantize_vector(const type* vec, int D, int x, int* out_idx, int* out_sign) {
-    /*
-     Approccio:
-     - Leggo il vettore una sola volta 
-     Questa parte probabilmente si può ottimizzare molto
-     - Salvo gli 'x' indici con valore assoluto maggiore
-     - Salvo il segno in out_sign
+    // Manteniamo una lista top-x di (abs, idx, sign) già materializzata
+    // Così evitiamo fabs(vec[out_idx[j]]) dentro il loop interno.
+    type* best_abs = (type*)alloca((size_t)x * sizeof(type));
 
-     Problema:
-     Questa parte forse si potrebbe ottimizzare
-     out_sign[i] deve salvare il segno dell'elemento vec[out_idx[i]]
-    */
     for (int i = 0; i < x; i++) {
-        out_idx[i] = -1;
+        out_idx[i]  = -1;
+        out_sign[i] = 1;
+        best_abs[i] = (type)-1.0;   // sentinella
     }
 
     for (int i = 0; i < D; i++) {
         type val = vec[i];
-        type abs_val = fabs(val);
+        type abs_val = (type)fabs(val);
 
-        // Troviamo la posizione di inserimento 
-        // manteniamo decrescente per facilità
+        // trova posizione di inserimento nella top-x (ordine decrescente)
         int pos = -1;
-        for(int j=0; j<x; j++) {
-             if (out_idx[j] == -1 || abs_val > fabs(vec[out_idx[j]])) {
-                pos = j;
-                break;
-            }
+        for (int j = 0; j < x; j++) {
+            if (abs_val > best_abs[j]) { pos = j; break; }
+        }
+        if (pos < 0) continue;
+
+        // shift verso destra
+        for (int k = x - 1; k > pos; k--) {
+            best_abs[k] = best_abs[k - 1];
+            out_idx[k]  = out_idx[k - 1];
+            out_sign[k] = out_sign[k - 1];
         }
 
-        if (pos != -1) {
-            // Shift a destra per fare spazio
-            for (int k = x - 1; k > pos; k--) {
-                out_idx[k] = out_idx[k-1];
-                out_sign[k] = out_sign[k-1];
-            }
-            // Inserimento
-            out_idx[pos] = i;
-            out_sign[pos] = (val >= 0) ? 1 : -1;
-        }
+        best_abs[pos] = abs_val;
+        out_idx[pos]  = i;
+        out_sign[pos] = (val >= 0) ? 1 : -1;
     }
 }
+
 
 /**
  * Calcolo esplicito dei 4 termini della distanza approssimata.
@@ -181,57 +184,79 @@ void fit(params* input) {
 
 //  PREDICT (Querying)
 void predict(params* input) {
-    int N = input->N;
-    int D = input->D;
-    int h = input->h;
-    int k = input->k;
-    int x = input->x;
+    int N  = input->N;
+    int D  = input->D;
+    int h  = input->h;
+    int k  = input->k;
+    int x  = input->x;
     int nq = input->nq;
 
+    // Timer accumulati (Step A)
+    double t_quant      = 0.0;
+    double t_distapprox = 0.0;
+    double t_lowerbound = 0.0;
+    double t_euclid     = 0.0;
+
     // 1. Allocazione buffer temporanei
-    // Vettori pre-allocati per quantizzare
-    int* q_idx = (int*) malloc(x * sizeof(int));
+    int* q_idx  = (int*) malloc(x * sizeof(int));
     int* q_sign = (int*) malloc(x * sizeof(int));
-    int* p_idx = (int*) malloc(x * sizeof(int));
+    int* p_idx  = (int*) malloc(x * sizeof(int));
     int* p_sign = (int*) malloc(x * sizeof(int));
-    int* v_idx = (int*) malloc(x * sizeof(int));
+    int* v_idx  = (int*) malloc(x * sizeof(int));
     int* v_sign = (int*) malloc(x * sizeof(int));
-    // Array per memorizzare le distanze approssimate Query <-> Pivot
+
     type* dist_query_pivots = (type*) malloc(h * sizeof(type));
-    // Strutture temporanee per la lista dei K-NN (ID e distanze)
-    int* current_knn_ids = (int*) malloc(k * sizeof(int));
+
+    int*  current_knn_ids   = (int*)  malloc(k * sizeof(int));
     type* current_knn_dists = (type*) malloc(k * sizeof(type));
+
+    //test ottimizzazione #1
+    int* pivot_idxs  = (int*) malloc(h * x * sizeof(int));
+    int* pivot_signs = (int*) malloc(h * x * sizeof(int));
+
+    for (int j = 0; j < h; j++) {
+        int pivot_row = input->P[j];
+        type* pivot_vec = &input->DS[pivot_row * D];
+
+        double t0 = now_sec();
+        quantize_vector(pivot_vec, D, x, &pivot_idxs[j * x], &pivot_signs[j * x]);
+        t_quant += now_sec() - t0;
+    }
+
+    // fine test #1
 
     // Foreach Query
     for (int iq = 0; iq < nq; iq++) {
         type* query_vec = &input->Q[iq * D];
 
-        // 1. Inizializza la lista K-NN a {-1, +infinity} 
-        // Forse superfluo ma nel pdf si fa questo passaggio
-        // Sicuro si può ottimizzare via
+        // 1. Inizializza la lista K-NN a {-1, +infinity}
         for (int K = 0; K < k; K++) {
-            current_knn_ids[K] = -1;
+            current_knn_ids[K]   = -1;
             current_knn_dists[K] = FLT_MAX;
         }
 
-        quantize_vector(query_vec, D, x, q_idx, q_sign);
-        // 2. Calcola distanza approssimata tra Query e ogni Pivot 
-        for (int j = 0; j < h; j++) {
-            // Recupera il pivot dal dataset usando l'indice salvato in P
-            int pivot_row = input->P[j];
-            type* pivot_vec = &input->DS[pivot_row * D];
-            quantize_vector(pivot_vec, D, x, p_idx, p_sign);
-            // Prima il punto poi il pivot, resta coerente con fit()
-            dist_query_pivots[j] = dist_approx(q_idx, q_sign, p_idx, p_sign, x);
+        // quantize query
+        {
+            double t0 = now_sec();
+            quantize_vector(query_vec, D, x, q_idx, q_sign);
+            t_quant += now_sec() - t0;
         }
 
-        // 3. Scansiona tutto il dataset per trovare i candidati 
+        // pre-quantizzazione pivot (una volta sola)
+        for (int j = 0; j < h; j++) {
+            double t2 = now_sec();
+            dist_query_pivots[j] = dist_approx(q_idx, q_sign,
+                                            &pivot_idxs[j * x], &pivot_signs[j * x],
+                                            x);
+            t_distapprox += now_sec() - t2;
+        }
+
+        // 3. Scansiona tutto il dataset per trovare i candidati
         for (int v = 0; v < N; v++) {
 
             // Trova la distanza massima attuale nella lista K-NN (d_k^max)
-            // Questo ci serve per sapere se vale la pena considerare il punto v
             type d_k_max = -1.0;
-            int max_pos = -1; // Indice nell'array K-NN dell'elemento peggiore
+            int max_pos = -1;
 
             for (int K = 0; K < k; K++) {
                 if (current_knn_dists[K] > d_k_max) {
@@ -240,56 +265,73 @@ void predict(params* input) {
                 }
             }
 
-            // 4. Calcola il Lower Bound (d_pvt*) usando la disuguaglianza triangolare
-            // d_pvt* = max |d_approx(v, p) - d_approx(q, p)|
-            // Nota: d_approx(v, p) è già pre-calcolato in input->index durante il fit
-            type d_pvt_star = 0.0;
-            for (int j = 0; j < h; j++) {
-                type d_vp = input->index[v * h + j]; // Accesso alla matrice linearizzata
-                type diff = fabs(d_vp - dist_query_pivots[j]);
-                if (diff > d_pvt_star) {
-                    d_pvt_star = diff;
+            // 4. Lower bound (loop su h)
+            type d_pvt_star;
+            {
+                double t3 = now_sec();
+                d_pvt_star = 0.0;
+                for (int j = 0; j < h; j++) {
+                    type d_vp = input->index[v * h + j];
+                    type diff = fabs(d_vp - dist_query_pivots[j]);
+                    if (diff > d_pvt_star) d_pvt_star = diff;
                 }
+                t_lowerbound += now_sec() - t3;
             }
 
-            // 5. Primo filtro: se il Lower Bound supera d_k_max, scarta v 
+            // 5. Primo filtro
             if (d_pvt_star < d_k_max) {
 
-                // Se passa il filtro, dobbiamo calcolare la distanza approssimata reale d(q, v)
-                // Quantizziamo v al volo
-                quantize_vector(&input->DS[v * D], D, x, v_idx, v_sign);
+                // quantize v
+                {
+                    double t4 = now_sec();
+                    quantize_vector(&input->DS[v * D], D, x, v_idx, v_sign);
+                    t_quant += now_sec() - t4;
+                }
 
-                type d_approx_qv = dist_approx(q_idx, q_sign, v_idx, v_sign, x);
+                // dist approx query-v
+                type d_approx_qv;
+                {
+                    double t5 = now_sec();
+                    d_approx_qv = dist_approx(q_idx, q_sign, v_idx, v_sign, x);
+                    t_distapprox += now_sec() - t5;
+                }
 
-                // 6. Secondo filtro e aggiornamento lista 
+                // 6. Secondo filtro + update
                 if (d_approx_qv < d_k_max) {
-                    // Sostituiamo l'elemento peggiore (più lontano) con il nuovo candidato
-                    current_knn_ids[max_pos] = v;
+                    current_knn_ids[max_pos]   = v;
                     current_knn_dists[max_pos] = d_approx_qv;
                 }
             }
         }
 
-        // 7. Raffinamento: Calcola distanze Euclidee REALI per i K candidati trovati
-        //: "foreach (id, delta) in K-NN do delta = d(q, v_id)"
+        // 7. Raffinamento: distanze Euclidee REALI per i K candidati
         for (int K = 0; K < k; K++) {
             int id = current_knn_ids[K];
             if (id != -1) {
-                // Calcola distanza euclidea reale
-                type true_dist = euclidean_distance(query_vec, &input->DS[id * D], D);
+                type true_dist;
+                {
+                    double t6 = now_sec();
+                    true_dist = euclidean_distance(query_vec, &input->DS[id * D], D);
+                    t_euclid += now_sec() - t6;
+                }
 
-                // Scrivi nel risultato finale
-                input->id_nn[iq * k + K] = id;
+                input->id_nn[iq * k + K]   = id;
                 input->dist_nn[iq * k + K] = true_dist;
             } else {
-                // Caso in cui non ci sono abbastanza punti (non dovrebbe accadere con N >> k)
-                input->id_nn[iq * k + K] = -1;
+                input->id_nn[iq * k + K]   = -1;
                 input->dist_nn[iq * k + K] = FLT_MAX;
             }
         }
-
     }
 
+    // stampa una sola volta (Step A)
+    printf("\n[TIMERS] quantize_vector:    %.6f s\n", t_quant);
+    printf("[TIMERS] dist_approx:        %.6f s\n", t_distapprox);
+    printf("[TIMERS] lower_bound loop:   %.6f s\n", t_lowerbound);
+    printf("[TIMERS] euclidean_distance: %.6f s\n\n", t_euclid);
+
+    free(pivot_idxs);
+    free(pivot_signs);
     free(q_idx); free(q_sign);
     free(p_idx); free(p_sign);
     free(v_idx); free(v_sign);
