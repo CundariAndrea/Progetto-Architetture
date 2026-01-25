@@ -57,3 +57,22 @@ Test OK (ID)
 
 --- Verifica Output Distanze ---
 Test OK (Dist) - Max Diff: 3.8147e-06
+
+
+risultati post assembly
+
+FIT time = 0.05554 secs
+
+[TIMERS] quantize_vector:    20.294777 s
+[TIMERS] dist_approx:        0.629843 s
+[TIMERS] lower_bound loop:   0.110014 s
+[TIMERS] euclidean_distance: 0.004001 s
+[TIMERS] abs_sse32 kernel:   0.207004 s
+
+PREDICT time = 21.27326 secs
+
+--- Verifica Output ID ---
+Test OK (ID)
+
+--- Verifica Output Distanze ---
+Test OK (Dist) - Max Diff: 3.8147e-06

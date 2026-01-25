@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 199309L
 #include <math.h>
 #include <float.h>
 #include <stdlib.h>
@@ -5,7 +6,10 @@
 #include <string.h> // per memset
 #include "common.h"
 #include <time.h>
+#include <alloca.h>   
 
+static __thread double g_t_abs_sse = 0.0; //calcolo il tempo di abs_sse32
+extern void abs_sse32(float* out_abs, const float* in, int D);
 
 static inline double now_sec(void){
     struct timespec ts;
@@ -14,34 +18,37 @@ static inline double now_sec(void){
 
 }
 
-
 /**
  * Quantizzazione: Trova le X componenti con valore assoluto maggiore.
  * Output: riempie idx_buffer e sign_buffer
  */
+
+
 static void quantize_vector(const type* vec, int D, int x, int* out_idx, int* out_sign) {
-    // Manteniamo una lista top-x di (abs, idx, sign) già materializzata
-    // Così evitiamo fabs(vec[out_idx[j]]) dentro il loop interno.
+    // buffer per valori assoluti calcolati in SSE
+    float* absvals = (float*)alloca((size_t)D * sizeof(float));
+    double t0 = now_sec();
+    abs_sse32(absvals, vec, D);
+    g_t_abs_sse += now_sec() - t0;
+    // top-x
     type* best_abs = (type*)alloca((size_t)x * sizeof(type));
 
     for (int i = 0; i < x; i++) {
         out_idx[i]  = -1;
         out_sign[i] = 1;
-        best_abs[i] = (type)-1.0;   // sentinella
+        best_abs[i] = (type)-1.0f;
     }
 
     for (int i = 0; i < D; i++) {
-        type val = vec[i];
-        type abs_val = (type)fabs(val);
+        type abs_val = (type)absvals[i];   // <-- usa l'output SSE
+        type val     = vec[i];
 
-        // trova posizione di inserimento nella top-x (ordine decrescente)
         int pos = -1;
         for (int j = 0; j < x; j++) {
             if (abs_val > best_abs[j]) { pos = j; break; }
         }
         if (pos < 0) continue;
 
-        // shift verso destra
         for (int k = x - 1; k > pos; k--) {
             best_abs[k] = best_abs[k - 1];
             out_idx[k]  = out_idx[k - 1];
@@ -53,6 +60,7 @@ static void quantize_vector(const type* vec, int D, int x, int* out_idx, int* ou
         out_sign[pos] = (val >= 0) ? 1 : -1;
     }
 }
+
 
 
 /**
@@ -118,6 +126,52 @@ type dist_approx(int* v_idx, int* v_sign, int* w_idx, int* w_sign, int x) {
     type result = dot_vp_wp + dot_vm_wm - dot_vp_wm - dot_vm_wp;
     return result;
 }
+
+static inline type dist_approx_fast(const int* v_idx, const int* v_sign,
+                                    const int* w_idx, const int* w_sign,
+                                    int x, int D)
+{
+    // D=256 nel vostro caso. Usiamo buffer per-thread (safe anche se un giorno userete OpenMP)
+    static __thread unsigned char present[256];
+    static __thread signed char vsgn[256];
+
+    // azzera present (256 byte: cheap)
+    memset(present, 0, (size_t)D);
+
+    // carica v
+    for (int i = 0; i < x; i++) {
+        int idx = v_idx[i];
+        if ((unsigned)idx < (unsigned)D) {
+            present[idx] = 1;
+            vsgn[idx] = (signed char)v_sign[i];
+        }
+    }
+
+    int dot_vp_wp = 0, dot_vm_wm = 0, dot_vp_wm = 0, dot_vm_wp = 0;
+
+    // scansiona w e conta match
+    for (int j = 0; j < x; j++) {
+        int idx = w_idx[j];
+        if ((unsigned)idx < (unsigned)D && present[idx]) {
+            int vs = vsgn[idx];
+            int ws = w_sign[j];
+
+            // replica ESATTAMENTE la tua logica attuale:
+            int is_v_plus  = (vs == 1);
+            int is_v_minus = (vs == 0);
+            int is_w_plus  = (ws == 1);
+            int is_w_minus = (ws == 0);
+
+            if (is_v_plus && is_w_plus) dot_vp_wp++;
+            else if (is_v_minus && is_w_minus) dot_vm_wm++;
+            else if (is_v_plus && is_w_minus) dot_vp_wm++;
+            else if (is_v_minus && is_w_plus) dot_vm_wp++;
+        }
+    }
+
+    return (type)(dot_vp_wp + dot_vm_wm - dot_vp_wm - dot_vm_wp);
+}
+
 
 // Necessaria per il passaggio finale della funzione predict
 static type euclidean_distance(type* v, type* w, int D) {
@@ -245,9 +299,9 @@ void predict(params* input) {
         // pre-quantizzazione pivot (una volta sola)
         for (int j = 0; j < h; j++) {
             double t2 = now_sec();
-            dist_query_pivots[j] = dist_approx(q_idx, q_sign,
-                                            &pivot_idxs[j * x], &pivot_signs[j * x],
-                                            x);
+            dist_query_pivots[j] = dist_approx_fast(q_idx, q_sign,
+                                        &pivot_idxs[j*x], &pivot_signs[j*x],
+                                        x, D);
             t_distapprox += now_sec() - t2;
         }
 
@@ -292,7 +346,7 @@ void predict(params* input) {
                 type d_approx_qv;
                 {
                     double t5 = now_sec();
-                    d_approx_qv = dist_approx(q_idx, q_sign, v_idx, v_sign, x);
+                    d_approx_qv = dist_approx_fast(q_idx, q_sign, v_idx, v_sign, x, D);
                     t_distapprox += now_sec() - t5;
                 }
 
@@ -328,7 +382,9 @@ void predict(params* input) {
     printf("\n[TIMERS] quantize_vector:    %.6f s\n", t_quant);
     printf("[TIMERS] dist_approx:        %.6f s\n", t_distapprox);
     printf("[TIMERS] lower_bound loop:   %.6f s\n", t_lowerbound);
-    printf("[TIMERS] euclidean_distance: %.6f s\n\n", t_euclid);
+    printf("[TIMERS] euclidean_distance: %.6f s\n", t_euclid);
+    printf("[TIMERS] abs_sse32 kernel:   %.6f s\n\n", g_t_abs_sse);
+    g_t_abs_sse = 0.0;
 
     free(pivot_idxs);
     free(pivot_signs);
