@@ -1,0 +1,78 @@
+risultato profilazione funzione predict prima dell'ottimizzazione 
+FIT time = 0.29358 secs
+
+[TIMERS] quantize_vector:    98.186896 s
+[TIMERS] dist_approx:        16.181961 s
+[TIMERS] lower_bound loop:   0.422596 s
+[TIMERS] euclidean_distance: 0.018861 s
+
+PREDICT time = 115.13197 secs
+
+--- Verifica Output ID ---
+Test OK (ID)
+
+--- Verifica Output Distanze ---
+Test OK (Dist) - Max Diff: 3.8147e-06
+
+
+risultato post ottimizzazione C (no assembly)
+make run 
+./knn \
+        -d ../../../../datasets/dataset_2000x256_32.ds2 \
+        -q ../../../../datasets/query_2000x256_32.ds2 \
+        -i ../../../results/results_ids_2000x8_k8_x64_32.ds2 \
+        -e ../../../results/results_dst_2000x8_k8_x64_32.ds2 \
+        -t ../../../../results/results_ids_2000x8_k8_x64_32.ds2 \
+        -r ../../../../results/results_dst_2000x8_k8_x64_32.ds2 \
+        -h 16 -k 8 -x 64
+
+   ===================================================
+   |              QUANTPIVOT CONFIGURATION           |
+   ===================================================
+   | Dataset              : ../../../../datasets/dataset_2000x256_32.ds2 |
+   | Query Set            : ../../../../datasets/query_2000x256_32.ds2 |
+   |-------------------------------------------------|
+   | Output ID (NN)       : ../../../results/results_ids_2000x8_k8_x64_32.ds2 |
+   | Output Dist (NN)     : ../../../results/results_dst_2000x8_k8_x64_32.ds2 |
+   |-------------------------------------------------|
+   | Test file ID         : ../../../../results/results_ids_2000x8_k8_x64_32.ds2 |
+   | Test file Dist       : ../../../../results/results_dst_2000x8_k8_x64_32.ds2 |
+   |-------------------------------------------------|
+   | Pivots (h)           : 16                       |
+   | Neighbors (k)        : 8                        |
+   | Quantization (x)     : 64                       |
+   ===================================================
+
+FIT time = 0.07206 secs
+
+[TIMERS] quantize_vector:    24.351263 s
+[TIMERS] dist_approx:        3.945511 s
+[TIMERS] lower_bound loop:   0.125310 s
+[TIMERS] euclidean_distance: 0.007089 s
+
+PREDICT time = 28.69304 secs
+
+--- Verifica Output ID ---
+Test OK (ID)
+
+--- Verifica Output Distanze ---
+Test OK (Dist) - Max Diff: 3.8147e-06
+
+
+risultati post assembly
+
+FIT time = 0.05554 secs
+
+[TIMERS] quantize_vector:    20.294777 s
+[TIMERS] dist_approx:        0.629843 s
+[TIMERS] lower_bound loop:   0.110014 s
+[TIMERS] euclidean_distance: 0.004001 s
+[TIMERS] abs_sse32 kernel:   0.207004 s
+
+PREDICT time = 21.27326 secs
+
+--- Verifica Output ID ---
+Test OK (ID)
+
+--- Verifica Output Distanze ---
+Test OK (Dist) - Max Diff: 3.8147e-06
