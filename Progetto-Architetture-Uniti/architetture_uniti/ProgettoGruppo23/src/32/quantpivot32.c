@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 199309L
+#define _POSIX_C_SOURCE 200809L
 #include <math.h>
 #include <float.h>
 #include <stdlib.h>
@@ -9,7 +9,19 @@
 #include <alloca.h>   
 
 static __thread double g_t_abs_sse = 0.0; //calcolo il tempo di abs_sse32
+
+
 extern void abs_sse32(float* out_abs, const float* in, int D);
+
+static inline void abs_sse32_safe(float* out_abs, const float* in, int D) {
+    int D4 = D & ~3;
+    if (D4 > 0) abs_sse32(out_abs, in, D4);   // chiamata a funzione esterna OK
+    for (int i = D4; i < D; i++) {
+        float v = in[i];
+        out_abs[i] = (v < 0.0f) ? -v : v;
+    }
+}
+
 
 static inline double now_sec(void){
     struct timespec ts;
@@ -28,7 +40,7 @@ static void quantize_vector(const type* vec, int D, int x, int* out_idx, int* ou
     // buffer per valori assoluti calcolati in SSE
     float* absvals = (float*)alloca((size_t)D * sizeof(float));
     double t0 = now_sec();
-    abs_sse32(absvals, vec, D);
+    abs_sse32_safe(absvals, vec, D);
     g_t_abs_sse += now_sec() - t0;
     // top-x
     type* best_abs = (type*)alloca((size_t)x * sizeof(type));
@@ -71,96 +83,66 @@ static void quantize_vector(const type* vec, int D, int x, int* out_idx, int* ou
  * @param w_sign  Segni di w (1 = positivo/w+, 0 = negativo/w-)
  * @param x       Numero di elementi salvati (quantizzazione)
  */
-type dist_approx(int* v_idx, int* v_sign, int* w_idx, int* w_sign, int x) {
-    /*
-    Questa funzione è volutamente non ottimizzata e rispecchia il pdf
-    Si può ottimizzare molto e va fatto in nasm
-    Inutile complicarla qui
-    Esempio possibile ottimizzazione:
-    - Calcolo prodotto scalare tramite |a|*|b|*cos(phi)
-    */
-    // 1. Inizializziamo i 4 accumulatori dell'Eq. (2)
-    type dot_vp_wp = 0.0; // (v+ * w+)
-    type dot_vm_wm = 0.0; // (v- * w-)
-    type dot_vp_wm = 0.0; // (v+ * w-)
-    type dot_vm_wp = 0.0; // (v- * w+)
 
-    // 2. Doppio ciclo per trovare le intersezioni 
-    // prodotto scalare completo
-    for (int i = 0; i < x; i++) {
-        for (int j = 0; j < x; j++) {
-            // Il prodotto è non-zero solo se gli indici coincidono
-            // v = [0 1 1] w = [0 0 1] v*w = 0*0 + 0*1 + 1*1
-            if (v_idx[i] == w_idx[j]) {
-                // Determiniamo a quale parte del vettore appartiene v (v+ o v-)
-                int is_v_plus  = (v_sign[i] == 1);
-                int is_v_minus = (v_sign[i] == 0); // o else
-
-                // Determiniamo a quale parte del vettore appartiene w (w+ o w-)
-                int is_w_plus  = (w_sign[j] == 1);
-                int is_w_minus = (w_sign[j] == 0); // o else
-
-                // 3. Aggiorniamo il termine corrispondente
-                // Caso: v+ e w+
-                if (is_v_plus && is_w_plus) {
-                    dot_vp_wp += 1.0;
-                }
-                // Caso: v- e w-
-                else if (is_v_minus && is_w_minus) {
-                    dot_vm_wm += 1.0;
-                }
-                // Caso: v+ e w-
-                else if (is_v_plus && is_w_minus) {
-                    dot_vp_wm += 1.0;
-                }
-                // Caso: v- e w+
-                else if (is_v_minus && is_w_plus) {
-                    dot_vm_wp += 1.0;
-                }
-            }
-        }
-    }
-
-    // 4. Applichiamo la formula finale (Eq. 2 del PDF)
-    // d = (v+ * w+) + (v- * w-) - (v+ * w-) - (v- * w+)
-    type result = dot_vp_wp + dot_vm_wm - dot_vp_wm - dot_vm_wp;
-    return result;
-}
+#include <stdint.h>
+#include <stdlib.h>
 
 static inline type dist_approx_fast(const int* v_idx, const int* v_sign,
                                     const int* w_idx, const int* w_sign,
                                     int x, int D)
 {
-    // D=256 nel vostro caso. Usiamo buffer per-thread (safe anche se un giorno userete OpenMP)
-    static __thread unsigned char present[256];
-    static __thread signed char vsgn[256];
+    // Buffer per-thread, ridimensionabili
+    static __thread uint32_t *seen = NULL;
+    static __thread int8_t   *vsgn = NULL;
+    static __thread uint32_t cap = 0;
+    static __thread uint32_t stamp = 1;
 
-    // azzera present (256 byte: cheap)
-    memset(present, 0, (size_t)D);
+    // (Ri)alloc se D cresce
+    if ((uint32_t)D > cap) {
+        uint32_t newcap = (cap == 0) ? 256 : cap;
+        while (newcap < (uint32_t)D) newcap *= 2;
 
-    // carica v
+        seen = (uint32_t*)realloc(seen, newcap * sizeof(uint32_t));
+        vsgn = (int8_t*)  realloc(vsgn, newcap * sizeof(int8_t));
+
+        // inizializza seen a 0 per tutta la nuova capacità
+        // (solo quando riallochiamo)
+        for (uint32_t i = cap; i < newcap; i++) seen[i] = 0;
+
+        cap = newcap;
+    }
+
+    // gestione overflow stamp (raro ma corretto)
+    stamp++;
+    if (stamp == 0) {
+        // azzera seen e riparti
+        for (uint32_t i = 0; i < cap; i++) seen[i] = 0;
+        stamp = 1;
+    }
+
+    // carica v in O(x)
     for (int i = 0; i < x; i++) {
         int idx = v_idx[i];
         if ((unsigned)idx < (unsigned)D) {
-            present[idx] = 1;
-            vsgn[idx] = (signed char)v_sign[i];
+            seen[idx] = stamp;
+            vsgn[idx] = (int8_t)v_sign[i];   // attesi: +1 o -1
         }
     }
 
     int dot_vp_wp = 0, dot_vm_wm = 0, dot_vp_wm = 0, dot_vm_wp = 0;
 
-    // scansiona w e conta match
+    // scansiona w in O(x)
     for (int j = 0; j < x; j++) {
         int idx = w_idx[j];
-        if ((unsigned)idx < (unsigned)D && present[idx]) {
+        if ((unsigned)idx < (unsigned)D && seen[idx] == stamp) {
             int vs = vsgn[idx];
             int ws = w_sign[j];
 
-            // replica ESATTAMENTE la tua logica attuale:
+            // versione coerente con la tua logica: plus se +1, minus altrimenti
             int is_v_plus  = (vs == 1);
-            int is_v_minus = (vs == 0);
+            int is_v_minus = !is_v_plus;
             int is_w_plus  = (ws == 1);
-            int is_w_minus = (ws == 0);
+            int is_w_minus = !is_w_plus;
 
             if (is_v_plus && is_w_plus) dot_vp_wp++;
             else if (is_v_minus && is_w_minus) dot_vm_wm++;
@@ -171,6 +153,7 @@ static inline type dist_approx_fast(const int* v_idx, const int* v_sign,
 
     return (type)(dot_vp_wp + dot_vm_wm - dot_vp_wm - dot_vm_wp);
 }
+
 
 
 // Necessaria per il passaggio finale della funzione predict
@@ -225,7 +208,9 @@ void fit(params* input) {
         // Calcola distanze con tutti i pivot
         for (int j = 0; j < h; j++) {
             // Prima il punto di DS e poi il pivot (Da formula)
-            type dist = dist_approx(point_idx, point_sign, &pivot_idxs[j*x], &pivot_signs[j*x], x);
+            type dist = dist_approx_fast(point_idx, point_sign,
+                            &pivot_idxs[j*x], &pivot_signs[j*x],
+                            x, D);
             input->index[i * h + j] = dist;
         }
     }

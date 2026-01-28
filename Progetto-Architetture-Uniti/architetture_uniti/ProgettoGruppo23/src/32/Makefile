@@ -1,4 +1,4 @@
-CFLAGS = -m32 -Wall -fopenmp -O3 -msse -fPIC -z noexecstack
+CFLAGS = -Wall -fopenmp -O3 -msse -fPIC -z noexecstack
 
 TARGET = knn
 
@@ -6,7 +6,7 @@ TARGET = knn
 
 build:
 	for f in *.nasm; do \
-		nasm -f elf32 -DPIC $$f; \
+		nasm -f elf64 -DPIC $$f; \
 	done
 	gcc $(CFLAGS) -o $(TARGET) main.c *.o ../helper/*.c -lm
 
