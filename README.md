@@ -1,4 +1,4 @@
-<h2> QuantPivot – Approximate Nearest Neighbors (32-bit Optimized) </h2>
+<h2> QuantPivot – Approximate Nearest Neighbors  </h2>
 
 Questo progetto implementa un algoritmo di Approximate Nearest Neighbors (ANN) basato su QuantPivot, sviluppato come progetto per il corso di Architetture Avanzate dei Sistemi di Elaborazione.
 
