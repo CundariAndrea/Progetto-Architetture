@@ -4,6 +4,7 @@
 #include <xmmintrin.h>
 #include <string.h>
 #include "common.h"
+#include <stdio.h>
 
 void* get_block(int size, int elements) {
     return _mm_malloc((size_t)size * elements, 32);
@@ -129,8 +130,22 @@ void fit(params* input) {
     free(point_idx);
     free(point_sign);
 }
-
 void predict(params* input) {
+    printf("DEBUG: Entrato in predict\n"); fflush(stdout);
+
+    // --- CONTROLLI DI SICUREZZA ---
+    if (input == NULL) {
+        printf("FATAL ERROR: Struct 'input' is NULL!\n"); fflush(stdout); exit(1);
+    }
+    printf("DEBUG: Check pointers -> DS=%p, Q=%p, P=%p, index=%p\n", 
+           (void*)input->DS, (void*)input->Q, (void*)input->P, (void*)input->index); fflush(stdout);
+
+    if (input->DS == NULL) { printf("FATAL ERROR: input->DS is NULL (Dataset persa?)\n"); exit(1); }
+    if (input->Q == NULL)  { printf("FATAL ERROR: input->Q is NULL (Query non passata?)\n"); exit(1); }
+    if (input->P == NULL)  { printf("FATAL ERROR: input->P is NULL (Fit non eseguito?)\n"); exit(1); }
+    if (input->index == NULL) { printf("FATAL ERROR: input->index is NULL (Fit non eseguito?)\n"); exit(1); }
+    // -----------------------------
+
     int N = input->N;
     int D = input->D;
     int h = input->h;
@@ -138,6 +153,9 @@ void predict(params* input) {
     int x = input->x;
     int nq = input->nq;
 
+    printf("DEBUG: Params -> N=%d, D=%d, h=%d, k=%d, x=%d, nq=%d\n", N, D, h, k, x, nq); fflush(stdout);
+
+    // Allocazione Buffer
     int* q_idx = (int*) malloc(x * sizeof(int));
     int* q_sign = (int*) malloc(x * sizeof(int));
     int* p_idx = (int*) malloc(x * sizeof(int));
@@ -149,7 +167,12 @@ void predict(params* input) {
     int* current_knn_ids = (int*) malloc(k * sizeof(int));
     type* current_knn_dists = (type*) malloc(k * sizeof(type));
 
+    printf("DEBUG: Buffer allocati correttamente.\n"); fflush(stdout);
+
     for (int iq = 0; iq < nq; iq++) {
+        // Debug ogni 500 query per non intasare, ma stampa la prima
+        if (iq == 0 || iq % 500 == 0) { printf("DEBUG: Processing query %d/%d\n", iq, nq); fflush(stdout); }
+        
         type* query_vec = &input->Q[iq * D];
 
         for (int K = 0; K < k; K++) {
@@ -157,15 +180,22 @@ void predict(params* input) {
             current_knn_dists[K] = FLT_MAX;
         }
 
+        // 1. Quantize Query
         quantize_vector(query_vec, D, x, q_idx, q_sign);
         
+        // 2. Pivot Distances
         for (int j = 0; j < h; j++) {
             int pivot_row = input->P[j];
+            // Controllo bounds pivot
+            if (pivot_row < 0 || pivot_row >= N) {
+                printf("FATAL: Pivot index %d out of bounds (0..%d)\n", pivot_row, N); exit(1);
+            }
             type* pivot_vec = &input->DS[pivot_row * D];
             quantize_vector(pivot_vec, D, x, p_idx, p_sign);
             dist_query_pivots[j] = dist_approx(q_idx, q_sign, p_idx, p_sign, x);
         }
 
+        // 3. Scan Dataset
         for (int v = 0; v < N; v++) {
             type d_k_max = -1.0;
             int max_pos = -1;
@@ -179,7 +209,7 @@ void predict(params* input) {
 
             type d_pvt_star = 0.0;
             for (int j = 0; j < h; j++) {
-                type d_vp = input->index[v * h + j];
+                type d_vp = input->index[v * h + j]; 
                 type diff = fabs(d_vp - dist_query_pivots[j]);
                 if (diff > d_pvt_star) d_pvt_star = diff;
             }
@@ -195,6 +225,7 @@ void predict(params* input) {
             }
         }
 
+        // 4. Refinement
         for (int K = 0; K < k; K++) {
             int id = current_knn_ids[K];
             if (id != -1) {
@@ -208,6 +239,7 @@ void predict(params* input) {
         }
     }
 
+    printf("DEBUG: Fine predict, inizio free\n"); fflush(stdout);
     free(q_idx); free(q_sign);
     free(p_idx); free(p_sign);
     free(v_idx); free(v_sign);

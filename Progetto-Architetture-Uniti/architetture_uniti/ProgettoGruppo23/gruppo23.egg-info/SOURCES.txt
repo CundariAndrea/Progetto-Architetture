@@ -11,8 +11,6 @@ gruppo23.egg-info/top_level.txt
 gruppo23/quantpivot32/__init__.py
 gruppo23/quantpivot64/__init__.py
 gruppo23/quantpivot64omp/__init__.py
-src/32/quantpivot32.c
-src/32/quantpivot32_py.c
 src/64/quantpivot64.c
 src/64/quantpivot64_py.c
 src/64omp/quantpivot64omp.c
