@@ -175,6 +175,22 @@ static PyObject* QuantPivot64omp_predict(QuantPivot64ompObject *self, PyObject *
 	// Estrai dimensioni
 	self->input->nq = (int)PyArray_DIM(query_array, 0);
 
+	// Controlla che le colonne (D) coincidano col dataset
+	int Dq = (int)PyArray_DIM(query_array, 1);
+	if (self->input->D != Dq) {
+		PyErr_SetString(PyExc_ValueError, "Query must have the same number of columns (D) as dataset");
+		return NULL;
+	}
+
+	// Mantieni vivo l'array numpy della query (evita puntatori pendenti)
+	Py_INCREF(query_array);
+	Py_XDECREF(self->Q_array);
+	self->Q_array = query_array;
+
+	// PASSA la query alla struct params (questa era la parte mancante)
+	self->input->Q = query;
+
+
 	// Estrae il numero di K vicini
 	self->input->k = k;
 

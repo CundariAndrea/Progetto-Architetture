@@ -162,7 +162,7 @@ static PyObject* QuantPivot32_predict(QuantPivot32Object *self, PyObject *args, 
 	}
 
 	// Verifica che siano array contigui
-	type* query = (type*)(PyArrayObject*)PyArray_DATA(query_array);
+	type* query = (type*)PyArray_DATA(query_array);
 
 	uintptr_t addr = (uintptr_t)query;
 	int is_aligned = (addr % align == 0);
@@ -174,6 +174,22 @@ static PyObject* QuantPivot32_predict(QuantPivot32Object *self, PyObject *args, 
 
 	// Estrai dimensioni
 	self->input->nq = (int)PyArray_DIM(query_array, 0);
+
+	// Controlla che la query abbia lo stesso D del dataset
+	int Dq = (int)PyArray_DIM(query_array, 1);
+	if (self->input->D != Dq) {
+		PyErr_SetString(PyExc_ValueError, "Query must have the same number of columns (D) as dataset");
+		return NULL;
+	}
+
+	// Mantieni vivo l'array numpy della query (evita che venga liberato)
+	Py_INCREF(query_array);
+	Py_XDECREF(self->Q_array);
+	self->Q_array = query_array;
+
+	// *** RIGA CRUCIALE: collega Q dentro la struct params ***
+	self->input->Q = query;
+
 
 	// Estrae il numero di K vicini
 	self->input->k = k;

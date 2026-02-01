@@ -175,6 +175,21 @@ static PyObject* QuantPivot64_predict(QuantPivot64Object *self, PyObject *args, 
 	// Estrai dimensioni
 	self->input->nq = (int)PyArray_DIM(query_array, 0);
 
+		// Controlla che la query abbia lo stesso D del dataset
+	int Dq = (int)PyArray_DIM(query_array, 1);
+	if (self->input->D != Dq) {
+		PyErr_SetString(PyExc_ValueError, "Query must have the same number of columns (D) as dataset");
+		return NULL;
+	}
+
+	// Mantieni vivo l'array numpy della query
+	Py_INCREF(query_array);
+	Py_XDECREF(self->Q_array);
+	self->Q_array = query_array;
+
+	// *** FONDAMENTALE: passa la query alla struct params ***
+	self->input->Q = query;
+
 	// Estrae il numero di K vicini
 	self->input->k = k;
 
