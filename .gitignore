@@ -1,0 +1,24 @@
+# ===== Python =====
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# ===== Build / packaging =====
+build/
+dist/
+*.egg-info/
+*.so
+
+# ===== Output files =====
+distNN_*.ds2
+idNN_*.ds2
+
+# ===== NASM / C artifacts =====
+*.o
+knn
+
+# ===== OS junk =====
+*:Zone.Identifier
+.DS_Store
